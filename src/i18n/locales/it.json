@@ -180,8 +180,6 @@
     "pageSize": "Dimensione Pagina Risultati (Limite)",
     "pageSizeDesc": "Limita il numero di righe caricate per query per prevenire problemi di performance. Imposta a 0 per disabilitare (non consigliato).",
     "rows": "righe",
-    "maxConnections": "Dimensione Pool di Connessioni",
-    "maxConnectionsDesc": "Numero massimo di connessioni simultanee al database per pool. Ha effetto quando viene creato un nuovo pool di connessioni. Riavvia le connessioni per applicare le modifiche.",
     "connections": "connessioni",
     "appearance": "Aspetto",
     "localization": "Localizzazione",
@@ -325,6 +323,23 @@
         "details": "Dettagli errore",
         "copy": "Copia",
         "copied": "Copiato!"
+      },
+      "startError": {
+        "title": "Plugin non avviato",
+        "subtitle": "Impossibile avviare il processo del plugin. Controlla i dettagli dell'errore.",
+        "interpreterHint": "Questo plugin potrebbe richiedere un interprete (es. Python). Usa le Impostazioni Plugin per configurare il percorso dell'interprete.",
+        "details": "Dettagli Errore",
+        "copy": "Copia",
+        "copied": "Copiato!",
+        "configure": "Configura Interprete"
+      },
+      "pluginSettings": {
+        "title": "Impostazioni Plugin",
+        "interpreter": "Interprete",
+        "interpreterDesc": "Opzionale. Specifica l'eseguibile usato per avviare questo plugin (es. python3 su macOS/Linux, python o percorso completo su Windows). Lascia vuoto per usare il valore predefinito.",
+        "interpreterPlaceholder": "es. python3",
+        "browse": "Sfoglia...",
+        "fieldRequired": "{{label}} è obbligatorio"
       }
     },
     "shortcuts": {
@@ -431,6 +446,8 @@
     "sshKeyPassphrase": "Passphrase Chiave SSH (Opzionale)",
     "sshKeyPassphrasePlaceholder": "Inserisci passphrase se la chiave è cifrata",
     "saveKeychain": "Salva password nel Portachiavi",
+    "maxConnections": "Dimensione Pool di Connessioni",
+    "maxConnectionsDesc": "Numero massimo di connessioni simultanee per questo pool. Lascia vuoto per usare il valore predefinito (10).",
     "testConnection": "Testa Connessione",
     "save": "Salva",
     "failSave": "Salvataggio connessione fallito",
@@ -438,7 +455,14 @@
     "useSshConnection": "Usa Connessione SSH Esistente",
     "createInlineSsh": "Configura SSH Inline",
     "manageSshConnections": "Gestisci Connessioni SSH",
-    "noSshConnections": "Nessuna connessione SSH disponibile"
+    "noSshConnections": "Nessuna connessione SSH disponibile",
+    "sslMode": "Modalità SSL",
+    "sslModes": {
+      "disable": "Disabilitato",
+      "allow": "Permetti",
+      "prefer": "Preferito",
+      "require": "Richiesto"
+    }
   },
   "sshConnections": {
     "title": "Connessioni SSH",

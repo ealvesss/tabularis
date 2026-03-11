@@ -52,17 +52,22 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
         const loadedActiveTabId = await loadActiveTabId(activeConnectionId);
 
         if (loadedTabs.length > 0) {
-          setTabs(loadedTabs);
-          if (loadedActiveTabId) {
-            setActiveTabIds((prev) => ({
-              ...prev,
-              [activeConnectionId]: loadedActiveTabId,
-            }));
-          }
+          // Merge loaded tabs with tabs from other connections
+          setTabs((prev) => {
+            const tabsFromOtherConnections = prev.filter(t => t.connectionId !== activeConnectionId);
+            return [...tabsFromOtherConnections, ...loadedTabs];
+          });
+          setActiveTabIds((prev) => ({
+            ...prev,
+            [activeConnectionId]: loadedActiveTabId || loadedTabs[0].id,
+          }));
         } else {
-          // Create initial tab if no tabs exist
+          // Create initial tab if no tabs exist, preserving other connections' tabs
           const initialTab = createInitialTabState(activeConnectionId);
-          setTabs([initialTab]);
+          setTabs((prev) => {
+            const tabsFromOtherConnections = prev.filter(t => t.connectionId !== activeConnectionId);
+            return [...tabsFromOtherConnections, initialTab];
+          });
           setActiveTabIds((prev) => ({
             ...prev,
             [activeConnectionId]: initialTab.id,
@@ -70,9 +75,12 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
         }
       } catch (e) {
         console.error("Failed to load preferences:", e);
-        // Fallback: create initial tab
+        // Fallback: create initial tab, preserving other connections' tabs
         const initialTab = createInitialTabState(activeConnectionId);
-        setTabs([initialTab]);
+        setTabs((prev) => {
+          const tabsFromOtherConnections = prev.filter(t => t.connectionId !== activeConnectionId);
+          return [...tabsFromOtherConnections, initialTab];
+        });
         setActiveTabIds((prev) => ({
           ...prev,
           [activeConnectionId]: initialTab.id,

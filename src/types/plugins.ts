@@ -4,6 +4,14 @@ export interface DriverCapabilities {
   routines: boolean;
   file_based: boolean;
   folder_based: boolean;
+  /** Optional flag to enable/disable connection string import UI for network drivers. Defaults to true when omitted. */
+  connection_string?: boolean;
+  /** CamelCase alias accepted for plugin compatibility. */
+  connectionString?: boolean;
+  /** Optional placeholder example shown in the connection string input. */
+  connection_string_example?: string;
+  /** CamelCase alias accepted for plugin compatibility. */
+  connectionStringExample?: string;
   identifier_quote: string;
   alter_primary_key: boolean;
   // SQL generation capabilities (optional, default to '' / false when not present)
@@ -13,6 +21,20 @@ export interface DriverCapabilities {
   // DDL capabilities (optional, default to false when not present)
   alter_column?: boolean;
   create_foreign_keys?: boolean;
+  /** true for API-based plugins that need no host/port/credentials (e.g. public REST APIs). Hides the entire connection form. */
+  no_connection_required?: boolean;
+}
+
+export type PluginSettingType = "string" | "boolean" | "number" | "select";
+
+export interface PluginSettingDefinition {
+  key: string;
+  label: string;
+  type: PluginSettingType;
+  default?: string | boolean | number;
+  description?: string;
+  required?: boolean;
+  options?: string[]; // only when type === "select"
 }
 
 export interface PluginManifest {
@@ -31,6 +53,8 @@ export interface PluginManifest {
   /** Icon name: built-in values are "mysql" | "postgres" | "sqlite" | "network" | "database" | "folder-open".
    * External plugins can reference a file bundled in the plugin package. */
   icon?: string;
+  /** Plugin-declared setting definitions. Empty/absent for built-in drivers. */
+  settings?: PluginSettingDefinition[];
 }
 
 export interface RegistryReleaseWithStatus {

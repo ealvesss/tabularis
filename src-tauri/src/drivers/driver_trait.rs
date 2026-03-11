@@ -26,6 +26,13 @@ pub struct DriverCapabilities {
     /// Folder-based database (e.g. CSV directory); connection points to a directory instead of a file.
     #[serde(default)]
     pub folder_based: bool,
+    /// Enables connection string import input in the connection modal.
+    /// Defaults to `true` for backward compatibility.
+    #[serde(default = "default_true", alias = "connectionString")]
+    pub connection_string: bool,
+    /// Optional placeholder example shown for connection string input.
+    #[serde(default, alias = "connectionStringExample")]
+    pub connection_string_example: String,
     /// Character used to quote identifiers (e.g. `"` for PostgreSQL, `` ` `` for MySQL).
     #[serde(default = "default_double_quote")]
     pub identifier_quote: String,
@@ -51,6 +58,10 @@ pub struct DriverCapabilities {
     /// Supports creating foreign key constraints (properly enforced).
     #[serde(default)]
     pub create_foreign_keys: bool,
+    /// API-based plugin that requires no host, port, or credentials.
+    /// When `true`, the connection form is hidden and database validation is skipped.
+    #[serde(default)]
+    pub no_connection_required: bool,
 }
 
 fn default_double_quote() -> String {
@@ -59,6 +70,23 @@ fn default_double_quote() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// A single user-configurable setting declared in a plugin's manifest.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PluginSettingDefinition {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub setting_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// Metadata describing a registered driver plugin.
@@ -90,6 +118,9 @@ pub struct PluginManifest {
     /// Lucide-compatible icon name (e.g. `"network"`, `"database"`). Empty string falls back to a generic icon.
     #[serde(default)]
     pub icon: String,
+    /// Plugin-declared settings definitions. Empty for built-in drivers.
+    #[serde(default)]
+    pub settings: Vec<PluginSettingDefinition>,
 }
 
 /// The complete interface every database driver plugin must implement.

@@ -1,6 +1,6 @@
 use crate::models::ConnectionParams;
 use once_cell::sync::Lazy;
-use sqlx::{MySql, Pool, Postgres, Sqlite};
+use sqlx::{postgres::PgConnectOptions, sqlite::SqliteConnectOptions, MySql, Pool, Postgres, Sqlite};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -12,6 +12,8 @@ static MYSQL_POOLS: Lazy<PoolMap<MySql>> = Lazy::new(|| Arc::new(RwLock::new(Has
 static POSTGRES_POOLS: Lazy<PoolMap<Postgres>> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 static SQLITE_POOLS: Lazy<PoolMap<Sqlite>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+const SQLITE_MAX_CONNECTIONS_CAP: u32 = 5;
 
 /// Build a stable connection key that works with SSH tunnels.
 /// If connection_id is provided (from saved connections), use it for stable pooling.
@@ -45,21 +47,25 @@ fn build_mysql_url(params: &ConnectionParams) -> String {
     )
 }
 
-fn build_postgres_url(params: &ConnectionParams) -> String {
-    let user = encode(params.username.as_deref().unwrap_or_default());
-    let pass = encode(params.password.as_deref().unwrap_or_default());
-    format!(
-        "postgres://{}:{}@{}:{}/{}",
-        user,
-        pass,
-        params.host.as_deref().unwrap_or("localhost"),
-        params.port.unwrap_or(5432),
-        params.database
-    )
+fn build_postgres_connectoptions(params: &ConnectionParams) -> PgConnectOptions {
+    let mut options = PgConnectOptions::new()
+        .username(params.username.as_deref().unwrap_or_default())
+        .password(params.password.as_deref().unwrap_or_default())
+        .port(params.port.unwrap_or(5432))
+        .host(params.host.as_deref().unwrap_or_default())
+        .database(&format!("{}", params.database));
+
+    if let Some(ssl_mode) = params.ssl_mode.as_deref() {
+        if let Ok(mode) = ssl_mode.parse() {
+            options = options.ssl_mode(mode);
+        }
+    }
+
+    options
 }
 
-fn build_sqlite_url(params: &ConnectionParams) -> String {
-    format!("sqlite://{}", params.database)
+fn build_sqlite_connectoptions(params: &ConnectionParams) -> SqliteConnectOptions {
+    SqliteConnectOptions::new().filename(params.database.to_string())
 }
 
 pub async fn get_mysql_pool(params: &ConnectionParams) -> Result<Pool<MySql>, String> {
@@ -94,7 +100,7 @@ pub async fn get_mysql_pool_with_id(
     );
     let url = build_mysql_url(params);
     let pool = sqlx::mysql::MySqlPoolOptions::new()
-        .max_connections(crate::config::get_pool_max_connections())
+        .max_connections(params.max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS))
         .connect(&url)
         .await
         .map_err(|e| {
@@ -147,15 +153,16 @@ pub async fn get_postgres_pool_with_id(
         params.host,
         key
     );
-    let url = build_postgres_url(params);
+    let copts = build_postgres_connectoptions(params);
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(crate::config::get_pool_max_connections())
-        .connect(&url)
+        .max_connections(params.max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS))
+        .connect_with(copts)
         .await
         .map_err(|e| {
             log::error!("Failed to create PostgreSQL connection pool: {}", e);
             e.to_string()
         })?;
+    log::info!("Max connections: {}", params.max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS));
     log::info!(
         "PostgreSQL connection pool created successfully for: {} (key: {})",
         params.database,
@@ -201,10 +208,10 @@ pub async fn get_sqlite_pool_with_id(
         params.database,
         key
     );
-    let url = build_sqlite_url(params);
+    let options = build_sqlite_connectoptions(params);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(crate::config::get_pool_max_connections())
-        .connect(&url)
+        .max_connections(SQLITE_MAX_CONNECTIONS_CAP)
+        .connect_with(options)
         .await
         .map_err(|e| {
             log::error!("Failed to create SQLite connection pool: {}", e);

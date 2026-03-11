@@ -723,7 +723,6 @@ mod tests {
     use super::*;
     use crate::models::{ConnectionParams, DatabaseSelection};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use std::str::FromStr;
     use tempfile::NamedTempFile;
 
     async fn setup_test_db() -> (ConnectionParams, NamedTempFile) {
@@ -737,6 +736,7 @@ mod tests {
             port: None,
             username: None,
             password: None,
+            ssl_mode: None,
             ssh_enabled: None,
             ssh_connection_id: None,
             ssh_host: None,
@@ -750,10 +750,9 @@ mod tests {
         };
 
         // Initialize DB with a table
-        // We use create_if_missing=true to ensure it works even if tempfile behavior varies
-        let url = format!("sqlite://{}", path);
-        let options = SqliteConnectOptions::from_str(&url)
-            .unwrap()
+        // Use .filename() to handle Windows paths correctly (avoids backslash issues in URLs)
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
             .create_if_missing(true);
 
         let pool = SqlitePoolOptions::new()
@@ -863,6 +862,8 @@ impl SqliteDriver {
                     routines: false,
                     file_based: true,
                     folder_based: false,
+                    connection_string: false,
+                    connection_string_example: String::new(),
                     identifier_quote: "\"".into(),
                     alter_primary_key: true,
                     auto_increment_keyword: "AUTOINCREMENT".into(),
@@ -870,11 +871,13 @@ impl SqliteDriver {
                     inline_pk: true,
                     alter_column: false,
                     create_foreign_keys: false,
+                    no_connection_required: false,
                 },
                 is_builtin: true,
                 default_username: String::new(),
                 color: "#06b6d4".to_string(),
                 icon: "sqlite".to_string(),
+                settings: vec![],
             },
         }
     }
@@ -889,7 +892,21 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     fn build_connection_url(&self, params: &crate::models::ConnectionParams) -> Result<String, String> {
-        Ok(format!("sqlite://{}", params.database))
+        // Normalize path separators for URL format (Windows backslashes → forward slashes)
+        let path = params.database.to_string().replace('\\', "/");
+        // Windows absolute paths (e.g. C:/path/file) need sqlite:///C:/... (3 slashes = empty authority + abs path)
+        // Unix absolute paths already start with / so sqlite:// + /path = sqlite:///path
+        if path.len() >= 2 && path.chars().nth(1) == Some(':') {
+            Ok(format!("sqlite:///{}", path))
+        } else {
+            Ok(format!("sqlite://{}", path))
+        }
+    }
+
+    async fn test_connection(&self, params: &crate::models::ConnectionParams) -> Result<(), String> {
+        // Use pool manager directly to avoid URL formatting issues with Windows paths
+        crate::pool_manager::get_sqlite_pool(params).await?;
+        Ok(())
     }
 
     async fn get_databases(&self, params: &crate::models::ConnectionParams) -> Result<Vec<String>, String> {

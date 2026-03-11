@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod commands;
+pub mod credential_cache;
 pub mod config;
 pub mod dump_commands; // Added
 pub mod dump_utils;
@@ -141,6 +142,7 @@ pub fn run() {
         .manage(export::ExportCancellationState::default())
         .manage(dump_commands::DumpCancellationState::default())
         .manage(log_buffer)
+        .manage(std::sync::Arc::new(credential_cache::CredentialCache::default()))
         .setup(move |app| {
             // Read persisted config to know which external plugins are enabled.
             // `None` means no preference has been saved yet → load all installed plugins.
@@ -154,7 +156,7 @@ pub fn run() {
                 drivers::registry::register_driver(drivers::sqlite::SqliteDriver::new()).await;
 
                 // Load only enabled external plugins (or all if no preference saved).
-                crate::plugins::manager::load_plugins(active_ext_drivers.as_deref()).await;
+                crate::plugins::manager::load_plugins(&app.handle(), active_ext_drivers.as_deref()).await;
             });
 
             // Open devtools automatically in debug mode
@@ -181,6 +183,7 @@ pub fn run() {
             commands::update_connection,
             commands::duplicate_connection,
             commands::get_connections,
+            commands::get_connection_by_id,
             commands::disconnect_connection,
             commands::get_data_types,
             // SSH Connections
@@ -189,6 +192,15 @@ pub fn run() {
             commands::update_ssh_connection,
             commands::delete_ssh_connection,
             commands::test_ssh_connection,
+            // Connection Groups
+            commands::get_connection_groups,
+            commands::get_connections_with_groups,
+            commands::create_connection_group,
+            commands::update_connection_group,
+            commands::delete_connection_group,
+            commands::move_connection_to_group,
+            commands::reorder_groups,
+            commands::reorder_connections_in_group,
             commands::get_schemas,
             commands::get_available_databases,
             commands::get_tables,
@@ -296,6 +308,8 @@ pub fn run() {
             plugins::commands::get_installed_plugins,
             plugins::commands::disable_plugin,
             plugins::commands::enable_plugin,
+            plugins::commands::get_plugin_manifest,
+            plugins::manager::get_plugin_startup_errors,
             // Task Manager
             task_manager::get_process_list,
             task_manager::get_system_stats,

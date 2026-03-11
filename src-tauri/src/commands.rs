@@ -7,12 +7,14 @@ use tokio::task::AbortHandle;
 use urlencoding::encode;
 use uuid::Uuid;
 
+use crate::credential_cache;
 use crate::keychain_utils;
 use crate::models::{
-    ColumnDefinition, ConnectionParams, ForeignKey, Index, QueryResult,
-    RoutineInfo, RoutineParameter, SavedConnection, SshConnection, SshConnectionInput,
-    SshTestParams, TableColumn, TableInfo, TestConnectionRequest,
+    ColumnDefinition, ConnectionGroup, ConnectionParams, ConnectionsFile, ForeignKey, Index,
+    QueryResult, RoutineInfo, RoutineParameter, SavedConnection, SshConnection,
+    SshConnectionInput, SshTestParams, TableColumn, TableInfo, TestConnectionRequest,
 };
+use crate::persistence;
 use crate::ssh_tunnel::{get_tunnels, SshTunnel};
 
 // Constants
@@ -42,6 +44,66 @@ impl Default for QueryCancellationState {
 
 // --- Persistence Helpers ---
 
+/// Load a single SSH connection by ID, fetching only its credentials from
+/// keychain (via the in-memory cache). This is O(1) keychain calls versus the
+/// O(N) behaviour of `get_ssh_connections`, which loads every saved SSH
+/// connection and retrieves credentials for each one.
+async fn get_ssh_connection_by_id<R: Runtime>(
+    app: &AppHandle<R>,
+    ssh_id: &str,
+) -> Result<SshConnection, String> {
+    let path = get_ssh_config_path(app)?;
+    if !path.exists() {
+        return Err(format!("SSH connection with ID {} not found", ssh_id));
+    }
+
+    // File I/O off the Tokio executor thread
+    let content = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || std::fs::read_to_string(path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut ssh = serde_json::from_str::<Vec<SshConnection>>(&content)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.id == ssh_id)
+        .ok_or_else(|| format!("SSH connection with ID {} not found", ssh_id))?;
+
+    // Backward compat: determine auth_type if absent (mirrors get_ssh_connections logic)
+    if ssh.auth_type.is_none() {
+        ssh.auth_type = Some(
+            if ssh.key_file.as_ref().map_or(false, |k| !k.trim().is_empty()) {
+                "ssh_key".to_string()
+            } else {
+                "password".to_string()
+            },
+        );
+    }
+
+    // Fetch credentials only for this connection, via the in-memory cache.
+    // On a warm cache hit this is a HashMap lookup (nanoseconds); on a cold miss
+    // it calls keychain once per credential and then caches the result.
+    if ssh.save_in_keychain.unwrap_or(false) {
+        // Clone the Arc out of the Tauri State so the closure owns it ('static bound)
+        let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>().inner().clone();
+        let id = ssh.id.clone();
+        let (pwd_r, pass_r) = tokio::task::spawn_blocking(move || {
+            let pwd  = credential_cache::get_ssh_password_cached(&cache, &id);
+            let pass = credential_cache::get_ssh_key_passphrase_cached(&cache, &id);
+            (pwd, pass)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if let Ok(v) = pwd_r  { if !v.trim().is_empty() { ssh.password       = Some(v); } }
+        if let Ok(v) = pass_r { if !v.trim().is_empty() { ssh.key_passphrase = Some(v); } }
+    }
+
+    Ok(ssh)
+}
+
 pub async fn expand_ssh_connection_params<R: Runtime>(
     app: &AppHandle<R>,
     params: &ConnectionParams,
@@ -50,25 +112,18 @@ pub async fn expand_ssh_connection_params<R: Runtime>(
 
     // If ssh_connection_id is set and SSH is enabled, load the SSH connection and merge it
     if params.ssh_enabled.unwrap_or(false) {
-        println!("[expand_ssh_connection_params] SSH is enabled");
         if let Some(ssh_id) = &params.ssh_connection_id {
-            println!(
-                "[expand_ssh_connection_params] Loading SSH connection: {}",
-                ssh_id
-            );
-            let ssh_connections = get_ssh_connections(app.clone()).await?;
-            let ssh_conn = ssh_connections
-                .iter()
-                .find(|s| &s.id == ssh_id)
-                .ok_or_else(|| format!("SSH connection with ID {} not found", ssh_id))?;
+            // Use targeted lookup instead of loading all SSH connections:
+            // this calls keychain only for this specific connection (O(1)),
+            // and results are backed by the in-memory credential cache.
+            let ssh_conn = get_ssh_connection_by_id(app, ssh_id).await?;
 
             // Populate legacy SSH fields from the SSH connection
-            // Passwords are already loaded by get_ssh_connections
-            expanded_params.ssh_host = Some(ssh_conn.host.clone());
-            expanded_params.ssh_port = Some(ssh_conn.port);
-            expanded_params.ssh_user = Some(ssh_conn.user.clone());
-            expanded_params.ssh_password = ssh_conn.password.clone();
-            expanded_params.ssh_key_file = ssh_conn.key_file.clone();
+            expanded_params.ssh_host           = Some(ssh_conn.host.clone());
+            expanded_params.ssh_port           = Some(ssh_conn.port);
+            expanded_params.ssh_user           = Some(ssh_conn.user.clone());
+            expanded_params.ssh_password       = ssh_conn.password.clone();
+            expanded_params.ssh_key_file       = ssh_conn.key_file.clone();
             expanded_params.ssh_key_passphrase = ssh_conn.key_passphrase.clone();
         }
     }
@@ -190,16 +245,19 @@ pub fn find_connection_by_id<R: Runtime>(
     if !path.exists() {
         return Err("Connection not found".into());
     }
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let connections: Vec<SavedConnection> = serde_json::from_str(&content).unwrap_or_default();
-    let mut conn = connections
+    // Use persistence module to properly load connections (handles both old and new formats)
+    let conn_file = persistence::load_connections_file(&path)?;
+    let mut conn = conn_file.connections
         .into_iter()
         .find(|c| c.id == id)
         .ok_or_else(|| "Connection not found".to_string())?;
 
-    // Load passwords from keychain if needed (like get_connections in v0.8.8)
+    // Load passwords from keychain if needed, via the in-memory cache.
+    // On a warm cache hit this is a HashMap lookup (nanoseconds); on a cold miss
+    // it calls keychain once and caches the result for all subsequent reads.
     if conn.params.save_in_keychain.unwrap_or(false) {
-        match keychain_utils::get_db_password(&conn.id) {
+        let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
+        match credential_cache::get_db_password_cached(&cache, &conn.id) {
             Ok(pwd) => conn.params.password = Some(pwd),
             Err(e) => eprintln!(
                 "[Keyring Error] Failed to get DB password for {}: {}",
@@ -207,12 +265,12 @@ pub fn find_connection_by_id<R: Runtime>(
             ),
         }
         if conn.params.ssh_enabled.unwrap_or(false) {
-            if let Ok(ssh_pwd) = keychain_utils::get_ssh_password(&conn.id) {
+            if let Ok(ssh_pwd) = credential_cache::get_ssh_password_cached(&cache, &conn.id) {
                 if !ssh_pwd.trim().is_empty() {
                     conn.params.ssh_password = Some(ssh_pwd);
                 }
             }
-            if let Ok(ssh_passphrase) = keychain_utils::get_ssh_key_passphrase(&conn.id) {
+            if let Ok(ssh_passphrase) = credential_cache::get_ssh_key_passphrase_cached(&cache, &conn.id) {
                 if !ssh_passphrase.trim().is_empty() {
                     conn.params.ssh_key_passphrase = Some(ssh_passphrase);
                 }
@@ -224,6 +282,14 @@ pub fn find_connection_by_id<R: Runtime>(
 }
 
 // --- Commands ---
+
+#[tauri::command]
+pub async fn get_connection_by_id<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<SavedConnection, String> {
+    find_connection_by_id(&app, &id)
+}
 
 #[tauri::command]
 pub async fn get_schemas<R: Runtime>(
@@ -337,28 +403,27 @@ pub async fn save_connection<R: Runtime>(
     log::info!("Saving new connection: {}", name);
 
     let path = get_config_path(&app)?;
-    let mut connections: Vec<SavedConnection> = if path.exists() {
-        let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut conn_file = persistence::load_connections_file(&path).unwrap_or_default();
 
     let id = Uuid::new_v4().to_string();
     let mut params_to_save = params.clone();
 
     if params.save_in_keychain.unwrap_or(false) {
         log::debug!("Storing passwords in keychain for connection: {}", name);
+        let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
         if let Some(pwd) = &params.password {
             keychain_utils::set_db_password(&id, pwd)?;
+            credential_cache::set_db_password_cached(&cache, &id, pwd);
         }
         if params.ssh_enabled.unwrap_or(false) {
             if let Some(ssh_pwd) = &params.ssh_password {
                 keychain_utils::set_ssh_password(&id, ssh_pwd)?;
+                credential_cache::set_ssh_password_cached(&cache, &id, ssh_pwd);
             }
             if let Some(ssh_passphrase) = &params.ssh_key_passphrase {
                 if !ssh_passphrase.trim().is_empty() {
                     keychain_utils::set_ssh_key_passphrase(&id, ssh_passphrase)?;
+                    credential_cache::set_ssh_key_passphrase_cached(&cache, &id, ssh_passphrase);
                 }
             }
         }
@@ -371,10 +436,11 @@ pub async fn save_connection<R: Runtime>(
         id: id.clone(),
         name: name.clone(),
         params: params_to_save,
+        group_id: None,
+        sort_order: None,
     };
-    connections.push(new_conn.clone());
-    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())?;
+    conn_file.connections.push(new_conn.clone());
+    persistence::save_connections_file(&path, &conn_file)?;
 
     log::info!("Connection saved successfully: {} (ID: {})", name, id);
 
@@ -392,20 +458,21 @@ pub async fn delete_connection<R: Runtime>(app: AppHandle<R>, id: String) -> Res
         return Ok(());
     }
 
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut connections: Vec<SavedConnection> = serde_json::from_str(&content).unwrap_or_default();
+    let mut conn_file = persistence::load_connections_file(&path)?;
 
-    let initial_count = connections.len();
-    connections.retain(|c| c.id != id);
-    let deleted = connections.len() < initial_count;
+    let initial_count = conn_file.connections.len();
+    conn_file.connections.retain(|c| c.id != id);
+    let deleted = conn_file.connections.len() < initial_count;
 
     // Attempt to remove passwords from keychain (ignore if not found)
     keychain_utils::delete_db_password(&id).ok();
     keychain_utils::delete_ssh_password(&id).ok();
     keychain_utils::delete_ssh_key_passphrase(&id).ok();
+    // Invalidate the in-memory cache for this connection
+    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
+    credential_cache::invalidate_all_for_connection(&cache, &id);
 
-    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())?;
+    persistence::save_connections_file(&path, &conn_file)?;
 
     if deleted {
         log::info!("Connection deleted successfully: {}", id);
@@ -424,32 +491,38 @@ pub async fn update_connection<R: Runtime>(
     params: ConnectionParams,
 ) -> Result<SavedConnection, String> {
     let path = get_config_path(&app)?;
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut connections: Vec<SavedConnection> = serde_json::from_str(&content).unwrap_or_default();
+    let mut conn_file = persistence::load_connections_file(&path)?;
 
-    let conn_idx = connections
+    let conn_idx = conn_file
+        .connections
         .iter()
         .position(|c| c.id == id)
         .ok_or("Connection not found")?;
 
     let mut params_to_save = params.clone();
 
+    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
     if params.save_in_keychain.unwrap_or(false) {
         if let Some(pwd) = &params.password {
             keychain_utils::set_db_password(&id, pwd)?;
+            credential_cache::set_db_password_cached(&cache, &id, pwd);
         }
         if params.ssh_enabled.unwrap_or(false) {
             if let Some(ssh_pwd) = &params.ssh_password {
                 keychain_utils::set_ssh_password(&id, ssh_pwd)?;
+                credential_cache::set_ssh_password_cached(&cache, &id, ssh_pwd);
             }
             if let Some(ssh_passphrase) = &params.ssh_key_passphrase {
                 if !ssh_passphrase.trim().is_empty() {
                     keychain_utils::set_ssh_key_passphrase(&id, ssh_passphrase)?;
+                    credential_cache::set_ssh_key_passphrase_cached(&cache, &id, ssh_passphrase);
                 }
             }
         } else {
             keychain_utils::delete_ssh_password(&id).ok();
             keychain_utils::delete_ssh_key_passphrase(&id).ok();
+            credential_cache::invalidate_ssh_password(&cache, &id);
+            credential_cache::invalidate_ssh_key_passphrase(&cache, &id);
         }
         params_to_save.password = None;
         params_to_save.ssh_password = None;
@@ -458,18 +531,28 @@ pub async fn update_connection<R: Runtime>(
         keychain_utils::delete_db_password(&id).ok();
         keychain_utils::delete_ssh_password(&id).ok();
         keychain_utils::delete_ssh_key_passphrase(&id).ok();
+        credential_cache::invalidate_all_for_connection(&cache, &id);
     }
+
+    // Preserve existing group_id and sort_order from the original connection
+    let original_group_id = conn_file.connections[conn_idx].group_id.clone();
+    let original_sort_order = conn_file.connections[conn_idx].sort_order;
 
     let updated = SavedConnection {
         id: id.clone(),
         name,
         params: params_to_save,
+        group_id: original_group_id,
+        sort_order: original_sort_order,
     };
 
-    connections[conn_idx] = updated.clone();
+    conn_file.connections[conn_idx] = updated.clone();
 
-    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())?;
+    persistence::save_connections_file(&path, &conn_file)?;
+
+    // Invalidate the cached pool so reconnecting picks up any changed settings
+    // (e.g. max_connections). Only affects this specific connection.
+    crate::pool_manager::close_pool_with_id(&params, Some(&id)).await;
 
     let mut returned_conn = updated;
     returned_conn.params = params;
@@ -482,27 +565,29 @@ pub async fn duplicate_connection<R: Runtime>(
     id: String,
 ) -> Result<SavedConnection, String> {
     let path = get_config_path(&app)?;
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut connections: Vec<SavedConnection> = serde_json::from_str(&content).unwrap_or_default();
+    let mut conn_file = persistence::load_connections_file(&path)?;
 
-    let original_idx = connections
+    let original_idx = conn_file
+        .connections
         .iter()
         .position(|c| c.id == id)
         .ok_or("Connection not found")?;
-    let mut original = connections[original_idx].clone();
+    let mut original = conn_file.connections[original_idx].clone();
 
-    // Recover passwords if in keychain
+    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
+
+    // Recover passwords if in keychain (via cache for fast repeat access)
     if original.params.save_in_keychain.unwrap_or(false) {
-        if let Ok(pwd) = keychain_utils::get_db_password(&original.id) {
+        if let Ok(pwd) = credential_cache::get_db_password_cached(&cache, &original.id) {
             original.params.password = Some(pwd);
         }
         if original.params.ssh_enabled.unwrap_or(false) {
-            if let Ok(ssh_pwd) = keychain_utils::get_ssh_password(&original.id) {
+            if let Ok(ssh_pwd) = credential_cache::get_ssh_password_cached(&cache, &original.id) {
                 if !ssh_pwd.trim().is_empty() {
                     original.params.ssh_password = Some(ssh_pwd);
                 }
             }
-            if let Ok(ssh_passphrase) = keychain_utils::get_ssh_key_passphrase(&original.id) {
+            if let Ok(ssh_passphrase) = credential_cache::get_ssh_key_passphrase_cached(&cache, &original.id) {
                 if !ssh_passphrase.trim().is_empty() {
                     original.params.ssh_key_passphrase = Some(ssh_passphrase);
                 }
@@ -517,14 +602,17 @@ pub async fn duplicate_connection<R: Runtime>(
     if new_params.save_in_keychain.unwrap_or(false) {
         if let Some(pwd) = &new_params.password {
             keychain_utils::set_db_password(&new_id, pwd)?;
+            credential_cache::set_db_password_cached(&cache, &new_id, pwd);
         }
         if new_params.ssh_enabled.unwrap_or(false) {
             if let Some(ssh_pwd) = &new_params.ssh_password {
                 keychain_utils::set_ssh_password(&new_id, ssh_pwd)?;
+                credential_cache::set_ssh_password_cached(&cache, &new_id, ssh_pwd);
             }
             if let Some(ssh_passphrase) = &new_params.ssh_key_passphrase {
                 if !ssh_passphrase.trim().is_empty() {
                     keychain_utils::set_ssh_key_passphrase(&new_id, ssh_passphrase)?;
+                    credential_cache::set_ssh_key_passphrase_cached(&cache, &new_id, ssh_passphrase);
                 }
             }
         }
@@ -537,12 +625,13 @@ pub async fn duplicate_connection<R: Runtime>(
         id: new_id,
         name: format!("{} (Copy)", original.name),
         params: new_params,
+        group_id: original.group_id.clone(), // Copy to same group as original
+        sort_order: None, // Will be placed at end of group
     };
 
-    connections.push(new_conn.clone());
+    conn_file.connections.push(new_conn.clone());
 
-    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())?;
+    persistence::save_connections_file(&path, &conn_file)?;
 
     let mut returned_conn = new_conn;
     // Return with passwords for frontend consistency
@@ -565,13 +654,8 @@ pub async fn get_connections<R: Runtime>(
     migrate_ssh_connections(&app).await.ok();
 
     let path = get_config_path(&app)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let connections: Vec<SavedConnection> = serde_json::from_str(&content).unwrap_or_default();
-
-    Ok(connections)
+    // Use persistence function that handles both old and new formats
+    persistence::load_connections(&path)
 }
 
 // ==================== SSH Connection Management ====================
@@ -583,8 +667,9 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
         return Ok(()); // Nothing to migrate
     }
 
-    let content = fs::read_to_string(&conn_path).map_err(|e| e.to_string())?;
-    let connections: Vec<SavedConnection> = serde_json::from_str(&content).unwrap_or_default();
+    // Load connections using persistence (handles both old and new formats)
+    let mut conn_file = persistence::load_connections_file(&conn_path)?;
+    let connections = &conn_file.connections;
 
     // Check if any connections have old embedded SSH params
     let needs_migration = connections
@@ -608,7 +693,7 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
     let mut migrated_connections = Vec::new();
     let mut ssh_connection_map: HashMap<String, String> = HashMap::new(); // (ssh_key -> ssh_id)
 
-    for mut conn in connections {
+    for mut conn in conn_file.connections.clone() {
         if conn.params.ssh_enabled.unwrap_or(false) && conn.params.ssh_connection_id.is_none() {
             // Extract SSH params
             if let (Some(host), Some(user)) = (&conn.params.ssh_host, &conn.params.ssh_user) {
@@ -628,12 +713,12 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
 
                     // Migrate credentials from connection keychain to SSH keychain
                     if conn.params.save_in_keychain.unwrap_or(false) {
-                        if let Ok(ssh_pwd) = keychain_utils::get_ssh_password(&conn.id) {
+                        if let Ok(ssh_pwd) = keychain_utils::get_ssh_password(&conn.id, &conn.name) {
                             if !ssh_pwd.trim().is_empty() {
                                 keychain_utils::set_ssh_password(&new_ssh_id, &ssh_pwd).ok();
                             }
                         }
-                        if let Ok(ssh_pass) = keychain_utils::get_ssh_key_passphrase(&conn.id) {
+                        if let Ok(ssh_pass) = keychain_utils::get_ssh_key_passphrase(&conn.id, &conn.name) {
                             if !ssh_pass.trim().is_empty() {
                                 keychain_utils::set_ssh_key_passphrase(&new_ssh_id, &ssh_pass).ok();
                             }
@@ -685,10 +770,9 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
     let ssh_json = serde_json::to_string_pretty(&ssh_connections).map_err(|e| e.to_string())?;
     fs::write(ssh_path, ssh_json).map_err(|e| e.to_string())?;
 
-    // Save migrated connections
-    let conn_json =
-        serde_json::to_string_pretty(&migrated_connections).map_err(|e| e.to_string())?;
-    fs::write(conn_path, conn_json).map_err(|e| e.to_string())?;
+    // Save migrated connections using new format (preserving groups)
+    conn_file.connections = migrated_connections;
+    persistence::save_connections_file(&conn_path, &conn_file)?;
 
     println!(
         "[Migration] Successfully migrated {} SSH connections",
@@ -705,37 +789,67 @@ pub async fn get_ssh_connections<R: Runtime>(
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+
+    // File I/O off the Tokio executor thread
+    let content = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || std::fs::read_to_string(path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
     let mut ssh_connections: Vec<SshConnection> =
         serde_json::from_str(&content).unwrap_or_default();
 
-    // Populate passwords from keychain if needed and determine auth_type for backward compatibility
+    // Backward compatibility: determine auth_type if missing
     for ssh in &mut ssh_connections {
-        // Backward compatibility: determine auth_type if missing
         if ssh.auth_type.is_none() {
             ssh.auth_type = Some(
-                if ssh.key_file.is_some()
-                    && ssh
-                        .key_file
-                        .as_ref()
-                        .map_or(false, |k| !k.trim().is_empty())
-                {
+                if ssh.key_file.as_ref().map_or(false, |k| !k.trim().is_empty()) {
                     "ssh_key".to_string()
                 } else {
                     "password".to_string()
                 },
             );
         }
+    }
 
-        if ssh.save_in_keychain.unwrap_or(false) {
-            if let Ok(pwd) = keychain_utils::get_ssh_password(&ssh.id) {
-                if !pwd.trim().is_empty() {
-                    ssh.password = Some(pwd);
+    // Fetch credentials for all connections that use keychain, in a single
+    // spawn_blocking call. The cache is checked first (HashMap lookup), so
+    // subsequent calls (e.g. from the UI refreshing the list) are near-instant.
+    let ids_needing_creds: Vec<String> = ssh_connections
+        .iter()
+        .filter(|s| s.save_in_keychain.unwrap_or(false))
+        .map(|s| s.id.clone())
+        .collect();
+
+    if !ids_needing_creds.is_empty() {
+        // Clone the Arc out of the Tauri State so the closure owns it ('static bound)
+        let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>().inner().clone();
+        let credentials = tokio::task::spawn_blocking(move || {
+            ids_needing_creds
+                .into_iter()
+                .map(|id| {
+                    let pwd  = credential_cache::get_ssh_password_cached(&cache, &id);
+                    let pass = credential_cache::get_ssh_key_passphrase_cached(&cache, &id);
+                    (id, pwd, pass)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        for (id, pwd_r, pass_r) in credentials {
+            if let Some(ssh) = ssh_connections.iter_mut().find(|s| s.id == id) {
+                if let Ok(pwd) = pwd_r {
+                    if !pwd.trim().is_empty() {
+                        ssh.password = Some(pwd);
+                    }
                 }
-            }
-            if let Ok(passphrase) = keychain_utils::get_ssh_key_passphrase(&ssh.id) {
-                if !passphrase.trim().is_empty() {
-                    ssh.key_passphrase = Some(passphrase);
+                if let Ok(pass) = pass_r {
+                    if !pass.trim().is_empty() {
+                        ssh.key_passphrase = Some(pass);
+                    }
                 }
             }
         }
@@ -767,8 +881,10 @@ pub async fn save_ssh_connection<R: Runtime>(
         user: ssh.user,
         auth_type: Some(ssh.auth_type.clone()),
         password: if ssh.save_in_keychain.unwrap_or(false) {
+            let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
             if let Some(pwd) = &ssh.password {
                 keychain_utils::set_ssh_password(&id, pwd)?;
+                credential_cache::set_ssh_password_cached(&cache, &id, pwd);
             }
             None
         } else {
@@ -776,9 +892,11 @@ pub async fn save_ssh_connection<R: Runtime>(
         },
         key_file: ssh.key_file.clone(),
         key_passphrase: if ssh.save_in_keychain.unwrap_or(false) {
+            let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
             if let Some(passphrase) = &ssh.key_passphrase {
                 if !passphrase.trim().is_empty() {
                     keychain_utils::set_ssh_key_passphrase(&id, passphrase)?;
+                    credential_cache::set_ssh_key_passphrase_cached(&cache, &id, passphrase);
                 }
             }
             None
@@ -815,18 +933,23 @@ pub async fn update_ssh_connection<R: Runtime>(
         .position(|s| s.id == id)
         .ok_or("SSH connection not found")?;
 
+    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
     if ssh.save_in_keychain.unwrap_or(false) {
         if let Some(pwd) = &ssh.password {
             keychain_utils::set_ssh_password(&id, pwd)?;
+            credential_cache::set_ssh_password_cached(&cache, &id, pwd);
         }
         if let Some(passphrase) = &ssh.key_passphrase {
             if !passphrase.trim().is_empty() {
                 keychain_utils::set_ssh_key_passphrase(&id, passphrase)?;
+                credential_cache::set_ssh_key_passphrase_cached(&cache, &id, passphrase);
             }
         }
     } else {
         keychain_utils::delete_ssh_password(&id).ok();
         keychain_utils::delete_ssh_key_passphrase(&id).ok();
+        credential_cache::invalidate_ssh_password(&cache, &id);
+        credential_cache::invalidate_ssh_key_passphrase(&cache, &id);
     }
 
     let ssh_to_save = SshConnection {
@@ -877,9 +1000,12 @@ pub async fn delete_ssh_connection<R: Runtime>(
 
     ssh_connections.retain(|s| s.id != id);
 
-    // Remove credentials from keychain
+    // Remove credentials from keychain and invalidate cache
     keychain_utils::delete_ssh_password(&id).ok();
     keychain_utils::delete_ssh_key_passphrase(&id).ok();
+    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
+    credential_cache::invalidate_ssh_password(&cache, &id);
+    credential_cache::invalidate_ssh_key_passphrase(&cache, &id);
 
     let json = serde_json::to_string_pretty(&ssh_connections).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())?;
@@ -907,7 +1033,7 @@ pub async fn test_ssh_connection<R: Runtime>(
                 serde_json::from_str(&content).unwrap_or_default();
             connections.into_iter().find(|c| c.id == conn_id)
         },
-        |conn_id| keychain_utils::get_ssh_password(conn_id),
+        |conn_id| keychain_utils::get_ssh_password(conn_id, ""),
     );
 
     // Resolve passphrase using same logic
@@ -924,7 +1050,7 @@ pub async fn test_ssh_connection<R: Runtime>(
                 serde_json::from_str(&content).unwrap_or_default();
             connections.into_iter().find(|c| c.id == conn_id)
         },
-        |conn_id| keychain_utils::get_ssh_key_passphrase(conn_id),
+        |conn_id| keychain_utils::get_ssh_key_passphrase(conn_id, ""),
         |conn| {
             conn.key_passphrase
                 .as_ref()
@@ -962,7 +1088,7 @@ pub async fn test_connection<R: Runtime>(
         };
         expanded_params.password =
             resolve_test_connection_password(&request.params, saved_conn.as_ref(), |conn_id| {
-                keychain_utils::get_db_password(conn_id)
+                keychain_utils::get_db_password(conn_id, "")
             });
     }
 
@@ -1012,6 +1138,7 @@ mod tests {
             username: Some("root".to_string()),
             password: None,
             database: DatabaseSelection::Single("testdb".to_string()),
+            ssl_mode: None,
             ssh_enabled: None,
             ssh_connection_id: None,
             ssh_host: None,
@@ -1034,6 +1161,8 @@ mod tests {
                 save_in_keychain: Some(save_in_keychain),
                 ..base_params()
             },
+            group_id: None,
+            sort_order: None,
         }
     }
 
@@ -1090,6 +1219,7 @@ mod tests {
                 username: Some(username.to_string()),
                 password: password.map(|p| p.to_string()),
                 database: DatabaseSelection::Single(database.to_string()),
+                ssl_mode: None,
                 ssh_enabled: None,
                 ssh_connection_id: None,
                 ssh_host: None,
@@ -1367,6 +1497,7 @@ mod tests {
                 username: Some("dbuser".to_string()),
                 password: Some("dbpass".to_string()),
                 database: DatabaseSelection::Single("testdb".to_string()),
+                ssl_mode: None,
                 ssh_enabled: Some(true),
                 ssh_connection_id: None,
                 ssh_host: Some(ssh_host.to_string()),
@@ -1477,7 +1608,7 @@ pub async fn list_databases<R: Runtime>(
         };
         expanded_params.password =
             resolve_test_connection_password(&request.params, saved_conn.as_ref(), |conn_id| {
-                keychain_utils::get_db_password(conn_id)
+                keychain_utils::get_db_password(conn_id, "")
             });
     }
 
@@ -2508,4 +2639,167 @@ pub async fn get_driver_manifest(
     crate::drivers::registry::get_driver(&driver_id)
         .await
         .map(|d| d.manifest().clone())
+}
+
+// ==================== Connection Groups Management ====================
+
+#[tauri::command]
+pub async fn get_connection_groups<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<ConnectionGroup>, String> {
+    let path = get_config_path(&app)?;
+    persistence::load_groups(&path)
+}
+
+#[tauri::command]
+pub async fn get_connections_with_groups<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ConnectionsFile, String> {
+    // Run migration if needed
+    migrate_ssh_connections(&app).await.ok();
+
+    let path = get_config_path(&app)?;
+    persistence::load_connections_file(&path)
+}
+
+#[tauri::command]
+pub async fn create_connection_group<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+) -> Result<ConnectionGroup, String> {
+    let path = get_config_path(&app)?;
+    let mut file = persistence::load_connections_file(&path).unwrap_or_default();
+
+    // Calculate next sort_order
+    let max_order = file.groups.iter().map(|g| g.sort_order).max().unwrap_or(-1);
+
+    let group = ConnectionGroup {
+        id: Uuid::new_v4().to_string(),
+        name,
+        collapsed: false,
+        sort_order: max_order + 1,
+    };
+
+    file.groups.push(group.clone());
+    persistence::save_connections_file(&path, &file)?;
+
+    Ok(group)
+}
+
+#[tauri::command]
+pub async fn update_connection_group<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    name: Option<String>,
+    collapsed: Option<bool>,
+    sort_order: Option<i32>,
+) -> Result<ConnectionGroup, String> {
+    let path = get_config_path(&app)?;
+    let mut file = persistence::load_connections_file(&path)?;
+
+    let group = file
+        .groups
+        .iter_mut()
+        .find(|g| g.id == id)
+        .ok_or_else(|| format!("Group with ID {} not found", id))?;
+
+    if let Some(n) = name {
+        group.name = n;
+    }
+    if let Some(c) = collapsed {
+        group.collapsed = c;
+    }
+    if let Some(o) = sort_order {
+        group.sort_order = o;
+    }
+
+    let updated = group.clone();
+    persistence::save_connections_file(&path, &file)?;
+
+    Ok(updated)
+}
+
+#[tauri::command]
+pub async fn delete_connection_group<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), String> {
+    let path = get_config_path(&app)?;
+    let mut file = persistence::load_connections_file(&path)?;
+
+    // Remove connections from the group (set group_id to None)
+    for conn in &mut file.connections {
+        if conn.group_id.as_ref() == Some(&id) {
+            conn.group_id = None;
+        }
+    }
+
+    // Remove the group
+    file.groups.retain(|g| g.id != id);
+    persistence::save_connections_file(&path, &file)?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn move_connection_to_group<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    group_id: Option<String>,
+    sort_order: Option<i32>,
+) -> Result<SavedConnection, String> {
+    let path = get_config_path(&app)?;
+    let mut file = persistence::load_connections_file(&path)?;
+
+    let conn = file
+        .connections
+        .iter_mut()
+        .find(|c| c.id == connection_id)
+        .ok_or_else(|| format!("Connection with ID {} not found", connection_id))?;
+
+    conn.group_id = group_id;
+    if let Some(order) = sort_order {
+        conn.sort_order = Some(order);
+    }
+
+    let updated = conn.clone();
+    persistence::save_connections_file(&path, &file)?;
+
+    Ok(updated)
+}
+
+#[tauri::command]
+pub async fn reorder_groups<R: Runtime>(
+    app: AppHandle<R>,
+    group_orders: Vec<(String, i32)>,
+) -> Result<(), String> {
+    let path = get_config_path(&app)?;
+    let mut file = persistence::load_connections_file(&path)?;
+
+    for (group_id, order) in group_orders {
+        if let Some(group) = file.groups.iter_mut().find(|g| g.id == group_id) {
+            group.sort_order = order;
+        }
+    }
+
+    persistence::save_connections_file(&path, &file)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reorder_connections_in_group<R: Runtime>(
+    app: AppHandle<R>,
+    connection_orders: Vec<(String, i32)>,
+) -> Result<(), String> {
+    let path = get_config_path(&app)?;
+    let mut file = persistence::load_connections_file(&path)?;
+
+    for (conn_id, order) in connection_orders {
+        if let Some(conn) = file.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.sort_order = Some(order);
+        }
+    }
+
+    persistence::save_connections_file(&path, &file)?;
+    Ok(())
 }

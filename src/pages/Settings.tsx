@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation, Trans } from "react-i18next";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
@@ -26,6 +27,7 @@ import {
   RotateCcw,
   ChevronDown,
   ChevronRight,
+  Check,
   ExternalLink,
   Activity,
   Keyboard,
@@ -35,7 +37,7 @@ import {
 import clsx from "clsx";
 import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
-import type { AppLanguage, AiProvider } from "../contexts/SettingsContext";
+import type { AppLanguage, AiProvider, PluginConfig } from "../contexts/SettingsContext";
 import { DEFAULT_SETTINGS } from "../contexts/SettingsContext";
 import { APP_VERSION } from "../version";
 import { message, ask, save } from "@tauri-apps/plugin-dialog";
@@ -47,8 +49,11 @@ import { useDatabase } from "../hooks/useDatabase";
 import { findConnectionsForDrivers } from "../utils/connectionManager";
 import { parseAuthor, versionGte } from "../utils/plugins";
 import type { PluginManifest } from "../types/plugins";
-import { SearchableSelect } from "../components/ui/SearchableSelect";
+import { Select } from "../components/ui/Select";
 import { PluginInstallErrorModal } from "../components/modals/PluginInstallErrorModal";
+import { PluginRemoveModal } from "../components/modals/PluginRemoveModal";
+import { PluginSettingsModal } from "../components/modals/PluginSettingsModal";
+import { PluginStartErrorModal } from "../components/modals/PluginStartErrorModal";
 import { useUpdate } from "../hooks/useUpdate";
 import { useKeybindings } from "../hooks/useKeybindings";
 import { formatEvent, formatMatch, parseCombo } from "../utils/keybindings";
@@ -665,6 +670,120 @@ const ShortcutsTab = () => {
   );
 };
 
+interface VersionOption {
+  version: string;
+  isInstalled: boolean;
+  isLatest: boolean;
+}
+
+const VersionDropdown = ({
+  options,
+  value,
+  onChange,
+  isDowngrade,
+  label,
+}: {
+  options: VersionOption[];
+  value: string;
+  onChange: (v: string) => void;
+  isDowngrade: boolean;
+  label: string;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0, minWidth: 0 });
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const dropRef = useRef<HTMLDivElement>(null);
+
+  const updatePos = () => {
+    if (btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      setPos({ top: r.bottom + 4, left: r.left, minWidth: Math.max(r.width, 160) });
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (!btnRef.current?.contains(e.target as Node) && !dropRef.current?.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setIsOpen(false); };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [isOpen]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => { updatePos(); setIsOpen((o) => !o); }}
+        className={clsx(
+          "flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] bg-surface-tertiary transition-colors cursor-pointer select-none",
+          isDowngrade
+            ? "border-amber-500/30 text-amber-400/80 hover:border-amber-500/60 hover:text-amber-400"
+            : isOpen
+            ? "border-blue-500/60 text-primary"
+            : "border-surface-quaternary text-secondary hover:border-blue-500/50 hover:text-primary"
+        )}
+      >
+        <RotateCcw size={9} />
+        <span>{label}</span>
+        <ChevronDown size={9} className={clsx("transition-transform duration-150", isOpen && "rotate-180")} />
+      </button>
+
+      {isOpen && createPortal(
+        <div
+          ref={dropRef}
+          style={{ top: pos.top, left: pos.left, minWidth: pos.minWidth }}
+          className="fixed z-[200] bg-elevated border border-strong rounded-lg shadow-xl overflow-hidden"
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.version}
+              type="button"
+              onClick={() => { onChange(opt.version); setIsOpen(false); }}
+              className={clsx(
+                "w-full flex items-center gap-2 px-3 py-2 text-xs text-left transition-colors",
+                opt.isInstalled
+                  ? "bg-green-500/10 hover:bg-green-500/20"
+                  : opt.version === value
+                  ? "bg-surface-secondary"
+                  : "hover:bg-surface-secondary"
+              )}
+            >
+              <span className="w-3 shrink-0 flex items-center justify-center">
+                {opt.isInstalled && <Check size={10} className="text-green-400" />}
+              </span>
+              <span className={clsx("font-mono", opt.isInstalled ? "text-green-300" : "text-primary")}>
+                v{opt.version}
+              </span>
+              <span className="ml-auto flex items-center gap-1">
+                {opt.isInstalled && (
+                  <span className="text-[9px] font-medium bg-green-500/20 text-green-400 px-1.5 py-px rounded">
+                    installed
+                  </span>
+                )}
+                {opt.isLatest && (
+                  <span className="text-[9px] font-medium bg-blue-500/20 text-blue-400 px-1.5 py-px rounded">
+                    latest
+                  </span>
+                )}
+              </span>
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+};
+
 export const Settings = () => {
   const { t } = useTranslation();
   const { settings, updateSetting } = useSettings();
@@ -680,18 +799,59 @@ export const Settings = () => {
   const { openConnectionIds, connectionDataMap, disconnect } = useDatabase();
   const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
   const [pluginInstallError, setPluginInstallError] = useState<{ pluginId: string; error: string } | null>(null);
+  const [pluginSettingsModal, setPluginSettingsModal] = useState<{ pluginId: string; pluginName: string } | null>(null);
+  const [openModalManifest, setOpenModalManifest] = useState<PluginManifest | undefined>(undefined);
+  const [pluginStartError, setPluginStartError] = useState<{ pluginId: string; pluginName: string; error: string } | null>(null);
   const [selectedVersions, setSelectedVersions] = useState<Record<string, string>>({});
   const [uninstallingPluginId, setUninstallingPluginId] = useState<string | null>(null);
+  const [pluginRemoveConfirm, setPluginRemoveConfirm] = useState<{ pluginId: string; pluginName: string; onConfirm: () => Promise<void> } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [explainPrompt, setExplainPrompt] = useState("");
   
   const { currentTheme, allThemes, setTheme } = useTheme();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const updateSettingRef = useRef(updateSetting);
+  updateSettingRef.current = updateSetting;
   
   // Initialize customFont from settings if it's a custom font
   const [customFont, setCustomFont] = useState(() => {
     const isPredefinedFont = AVAILABLE_FONTS.some(f => f.name === settings.fontFamily);
     return !isPredefinedFont && settings.fontFamily ? settings.fontFamily : "";
   });
+
+  const handleSavePluginConfig = useCallback(async (pluginId: string, pluginName: string, config: PluginConfig) => {
+    const current = settings.plugins ?? {};
+    updateSetting("plugins", { ...current, [pluginId]: config });
+    const isRunning = allDrivers.some(d => d.id === pluginId);
+    if (isRunning) {
+      try {
+        await invoke("disable_plugin", { pluginId });
+        await invoke("enable_plugin", { pluginId });
+        refreshDrivers();
+      } catch (err) {
+        const activeExt = settings.activeExternalDrivers ?? [];
+        updateSetting("activeExternalDrivers", activeExt.filter(id => id !== pluginId));
+        refreshDrivers();
+        setPluginStartError({ pluginId, pluginName, error: String(err) });
+      }
+    }
+  }, [settings.plugins, settings.activeExternalDrivers, updateSetting, allDrivers, refreshDrivers]);
+
+  const handleOpenPluginSettings = useCallback(async (pluginId: string, pluginName: string) => {
+    setPluginSettingsModal({ pluginId, pluginName });
+    const runningDriver = allDrivers.find((d) => d.id === pluginId);
+    if (runningDriver) {
+      setOpenModalManifest(runningDriver);
+    } else {
+      try {
+        const manifest = await invoke<PluginManifest>("get_plugin_manifest", { pluginId });
+        setOpenModalManifest(manifest);
+      } catch {
+        setOpenModalManifest(undefined);
+      }
+    }
+  }, [allDrivers]);
 
   const loadModels = useCallback(async (force: boolean = false) => {
     try {
@@ -817,6 +977,18 @@ export const Settings = () => {
     loadSystemPrompt();
     loadExplainPrompt();
     loadModels(false);
+    invoke<Array<{ plugin_id: string; error: string }>>("get_plugin_startup_errors").then((errors) => {
+      if (errors.length > 0) {
+        const failedIds = errors.map(e => e.plugin_id);
+        const activeExt = settingsRef.current.activeExternalDrivers ?? [];
+        const cleaned = activeExt.filter(id => !failedIds.includes(id));
+        if (cleaned.length !== activeExt.length) {
+          updateSettingRef.current("activeExternalDrivers", cleaned);
+        }
+        const first = errors[0];
+        setPluginStartError({ pluginId: first.plugin_id, pluginName: first.plugin_id, error: first.error });
+      }
+    }).catch(() => {/* ignore */});
   }, [loadModels]);
 
 
@@ -978,32 +1150,6 @@ export const Settings = () => {
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-secondary mb-1">
-                      {t("settings.maxConnections")}
-                    </label>
-                    <p className="text-xs text-muted mb-2">
-                      {t("settings.maxConnectionsDesc")}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        value={settings.maxConnections ?? DEFAULT_SETTINGS.maxConnections}
-                        onChange={(e) =>
-                          updateSetting(
-                            "maxConnections",
-                            parseInt(e.target.value) || DEFAULT_SETTINGS.maxConnections!,
-                          )
-                        }
-                        min="1"
-                        max="100"
-                        className="bg-base border border-strong rounded px-3 py-2 text-primary w-32 focus:outline-none focus:border-blue-500 transition-colors"
-                      />
-                      <span className="text-sm text-muted">
-                        {t("settings.connections")}
-                      </span>
-                    </div>
-                  </div>
                 </div>
               </div>
 
@@ -1514,7 +1660,7 @@ export const Settings = () => {
                                 <>
                                     <div className="flex gap-2">
                                         <div className="flex-1">
-                                            <SearchableSelect
+                                            <Select
                                                 value={settings.aiModel}
                                                 onChange={(val) => updateSetting("aiModel", val)}
                                                 options={currentModels}
@@ -1786,37 +1932,25 @@ export const Settings = () => {
                               )}
 
                               {/* Version picker — for downgrades when at latest, or between multiple installable versions */}
-                              {showVersionPicker && (
-                                <div className="relative inline-flex items-center">
-                                  <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] bg-surface-tertiary transition-colors pointer-events-none select-none ${
-                                    isDowngrade
-                                      ? "border-amber-500/30 text-amber-400/80"
-                                      : "border-surface-quaternary text-secondary hover:border-blue-500/50 hover:text-primary"
-                                  }`}>
-                                    <RotateCcw size={9} />
-                                    <span>{isAtLatest && isSelectedInstalled ? t("settings.plugins.olderVersions") : `v${selectedVer}`}</span>
-                                    <ChevronDown size={9} />
-                                  </div>
-                                  <select
+                              {showVersionPicker && (() => {
+                                const dropdownOptions: VersionOption[] = [
+                                  ...(isAtLatest ? [{ version: plugin.latest_version!, isInstalled: true, isLatest: true }] : []),
+                                  ...[...installableReleases].reverse().map((r) => ({
+                                    version: r.version,
+                                    isInstalled: false,
+                                    isLatest: r.version === plugin.latest_version,
+                                  })),
+                                ];
+                                return (
+                                  <VersionDropdown
+                                    options={dropdownOptions}
                                     value={selectedVer}
-                                    onChange={(e) =>
-                                      setSelectedVersions((prev) => ({ ...prev, [plugin.id]: e.target.value }))
-                                    }
-                                    className="absolute inset-0 w-full opacity-0 cursor-pointer"
-                                  >
-                                    {isAtLatest && (
-                                      <option value={plugin.latest_version} className="bg-surface-secondary text-primary">
-                                        v{plugin.latest_version} (installed, latest)
-                                      </option>
-                                    )}
-                                    {[...installableReleases].reverse().map((r) => (
-                                      <option key={r.version} value={r.version} className="bg-surface-secondary text-primary">
-                                        v{r.version}{r.version === plugin.latest_version ? " (latest)" : ""}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              )}
+                                    onChange={(v) => setSelectedVersions((prev) => ({ ...prev, [plugin.id]: v }))}
+                                    isDowngrade={isDowngrade}
+                                    label={isAtLatest && isSelectedInstalled ? t("settings.plugins.olderVersions") : `v${selectedVer}`}
+                                  />
+                                );
+                              })()}
                             </>
                           )
                         }
@@ -1873,7 +2007,7 @@ export const Settings = () => {
                                     updateSetting("activeExternalDrivers", [...activeExt, driver.id]);
                                   }
                                 } catch (err) {
-                                  await message(String(err), { title: t("common.error"), kind: "error" });
+                                  setPluginStartError({ pluginId: driver.id, pluginName: driver.name, error: String(err) });
                                 }
                               }}
                               disabled={isBuiltin}
@@ -1884,28 +2018,38 @@ export const Settings = () => {
                             >
                               <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition duration-200 ease-in-out ${isEnabled ? "translate-x-4" : "translate-x-0"}`} />
                             </button>
+                          {/* Plugin settings */}
+                          {!isBuiltin && (
+                            <button
+                              onClick={() => handleOpenPluginSettings(driver.id, driver.name)}
+                              className="p-1.5 text-secondary hover:text-primary transition-colors"
+                              title={t("settings.plugins.pluginSettings.title")}
+                            >
+                              <SettingsIcon size={15} />
+                            </button>
+                          )}
                           {/* Remove link */}
                           {!isBuiltin && (
                             <button
-                              onClick={async () => {
-                                const confirmed = await ask(
-                                  t("settings.plugins.confirmRemove", { name: driver.name }),
-                                  { title: t("settings.plugins.removeTitle"), kind: "warning" }
-                                );
-                                if (!confirmed) return;
-                                setUninstallingPluginId(driver.id);
-                                try {
-                                  const toDisconnect = findConnectionsForDrivers(openConnectionIds, connectionDataMap, [driver.id]);
-                                  await Promise.all(toDisconnect.map(id => disconnect(id)));
-                                  await invoke("uninstall_plugin", { pluginId: driver.id });
-                                  refreshDrivers();
-                                  refreshRegistry();
-                                } catch (err) {
-                                  await message(String(err), { title: t("common.error"), kind: "error" });
-                                } finally {
-                                  setUninstallingPluginId(null);
-                                }
-                              }}
+                              onClick={() => setPluginRemoveConfirm({
+                                pluginId: driver.id,
+                                pluginName: driver.name,
+                                onConfirm: async () => {
+                                  setUninstallingPluginId(driver.id);
+                                  setPluginRemoveConfirm(null);
+                                  try {
+                                    const toDisconnect = findConnectionsForDrivers(openConnectionIds, connectionDataMap, [driver.id]);
+                                    await Promise.all(toDisconnect.map(id => disconnect(id)));
+                                    await invoke("uninstall_plugin", { pluginId: driver.id });
+                                    refreshDrivers();
+                                    refreshRegistry();
+                                  } catch (err) {
+                                    setPluginInstallError({ pluginId: driver.id, error: String(err) });
+                                  } finally {
+                                    setUninstallingPluginId(null);
+                                  }
+                                },
+                              })}
                               disabled={uninstallingPluginId === driver.id}
                               className="flex items-center gap-1 text-[11px] text-red-500/70 hover:text-red-400 disabled:opacity-50 transition-colors"
                             >
@@ -1943,7 +2087,7 @@ export const Settings = () => {
                                     updateSetting("activeExternalDrivers", [...activeExt, plugin.id]);
                                     refreshDrivers();
                                   } catch (err) {
-                                    await message(String(err), { title: t("common.error"), kind: "error" });
+                                    setPluginStartError({ pluginId: plugin.id, pluginName: plugin.name, error: String(err) });
                                   }
                                 }}
                                 aria-label="Enable plugin"
@@ -1952,25 +2096,34 @@ export const Settings = () => {
                                 <span className="pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition duration-200 ease-in-out translate-x-0" />
                               </button>
                             {/* Remove link */}
+                            {/* Plugin settings */}
                             <button
-                              onClick={async () => {
-                                const confirmed = await ask(
-                                  t("settings.plugins.confirmRemove", { name: plugin.name }),
-                                  { title: t("settings.plugins.removeTitle"), kind: "warning" }
-                                );
-                                if (!confirmed) return;
-                                setUninstallingPluginId(plugin.id);
-                                try {
-                                  await invoke("uninstall_plugin", { pluginId: plugin.id });
-                                  updateSetting("activeExternalDrivers", activeExt.filter(id => id !== plugin.id));
-                                  refreshDrivers();
-                                  refreshRegistry();
-                                } catch (err) {
-                                  await message(String(err), { title: t("common.error"), kind: "error" });
-                                } finally {
-                                  setUninstallingPluginId(null);
-                                }
-                              }}
+                              onClick={() => handleOpenPluginSettings(plugin.id, plugin.name)}
+                              className="p-1.5 text-secondary hover:text-primary transition-colors"
+                              title={t("settings.plugins.pluginSettings.title")}
+                            >
+                              <SettingsIcon size={15} />
+                            </button>
+                            {/* Remove link */}
+                            <button
+                              onClick={() => setPluginRemoveConfirm({
+                                pluginId: plugin.id,
+                                pluginName: plugin.name,
+                                onConfirm: async () => {
+                                  setUninstallingPluginId(plugin.id);
+                                  setPluginRemoveConfirm(null);
+                                  try {
+                                    await invoke("uninstall_plugin", { pluginId: plugin.id });
+                                    updateSetting("activeExternalDrivers", activeExt.filter(id => id !== plugin.id));
+                                    refreshDrivers();
+                                    refreshRegistry();
+                                  } catch (err) {
+                                    setPluginInstallError({ pluginId: plugin.id, error: String(err) });
+                                  } finally {
+                                    setUninstallingPluginId(null);
+                                  }
+                                },
+                              })}
                               disabled={uninstallingPluginId === plugin.id}
                               className="flex items-center gap-1 text-[11px] text-red-500/70 hover:text-red-400 disabled:opacity-50 transition-colors"
                             >
@@ -2245,6 +2398,29 @@ export const Settings = () => {
         onClose={() => setPluginInstallError(null)}
         pluginId={pluginInstallError?.pluginId ?? ""}
         error={pluginInstallError?.error ?? ""}
+      />
+      <PluginRemoveModal
+        isOpen={pluginRemoveConfirm !== null}
+        onClose={() => setPluginRemoveConfirm(null)}
+        pluginName={pluginRemoveConfirm?.pluginName ?? ""}
+        onConfirm={() => pluginRemoveConfirm?.onConfirm()}
+      />
+      <PluginSettingsModal
+        key={pluginSettingsModal?.pluginId}
+        isOpen={pluginSettingsModal !== null}
+        onClose={() => { setPluginSettingsModal(null); setOpenModalManifest(undefined); }}
+        pluginId={pluginSettingsModal?.pluginId ?? ""}
+        pluginName={pluginSettingsModal?.pluginName ?? ""}
+        currentConfig={settings.plugins?.[pluginSettingsModal?.pluginId ?? ""]}
+        manifest={openModalManifest}
+        onSave={(config) => handleSavePluginConfig(pluginSettingsModal?.pluginId ?? "", pluginSettingsModal?.pluginName ?? "", config)}
+      />
+      <PluginStartErrorModal
+        isOpen={pluginStartError !== null}
+        onClose={() => setPluginStartError(null)}
+        pluginId={pluginStartError?.pluginId ?? ""}
+        error={pluginStartError?.error ?? ""}
+        onConfigureInterpreter={pluginStartError ? () => handleOpenPluginSettings(pluginStartError.pluginId, pluginStartError.pluginName) : undefined}
       />
     </div>
   );

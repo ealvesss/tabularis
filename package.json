@@ -1,7 +1,7 @@
 {
   "name": "tabularis",
   "private": true,
-  "version": "0.9.5",
+  "version": "0.9.8",
   "type": "module",
   "links": {
     "discord": "https://discord.gg/YrZPHAwMSG",
@@ -76,5 +76,6 @@
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4",
     "vitest": "^4.0.18"
-  }
+  },
+  "packageManager": "pnpm@10.30.3"
 }

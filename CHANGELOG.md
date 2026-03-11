@@ -1,3 +1,68 @@
+## [0.9.8](https://github.com/debba/tabularis/compare/v0.9.7...v0.9.8) (2026-03-11)
+
+
+### Bug Fixes
+
+* **new-connection-modal:** avoid returning promise from onClick ([14f644e](https://github.com/debba/tabularis/commit/14f644e7878249b471a2cb1c48a1c25bedbb747b))
+* **new-connection-modal:** reset tab on close and UI tweaks ([7a1f2fb](https://github.com/debba/tabularis/commit/7a1f2fbeb6301c89b588a59cdeb0a8f4f739a285))
+* **sqlite:** resolve SQLITE_CANTOPEN (error code 14) on Windows ([c8e5734](https://github.com/debba/tabularis/commit/c8e5734dbdf5920294bfdf24e76c8c8ef249e163))
+* **visual-query:** replace HTML5 drag-and-drop with pointer events for ([3afee6b](https://github.com/debba/tabularis/commit/3afee6ba61188f4bdb70096927c2311c45b1c8e8))
+
+
+### Features
+
+* **download-buttons:** add split download button with platform dropdown ([542961c](https://github.com/debba/tabularis/commit/542961cf34e3b8d0723af752f6ef96242b59818e))
+* **download:** add download modal and wire up download buttons ([f2cc6ab](https://github.com/debba/tabularis/commit/f2cc6ab146ea6d3313e1e175784fce0f04667ed3))
+* **drivers:** add connection string parser and import UI ([2258ba3](https://github.com/debba/tabularis/commit/2258ba39a4c84bdf0567bd12dd3716bccd2cf096))
+* **plugins:** add hackernews plugin to registry ([6635124](https://github.com/debba/tabularis/commit/663512496c25f88c5e03c413f34e30fb8db1fc1f))
+* use ubuntu 25.04 for building linux ([5f80a89](https://github.com/debba/tabularis/commit/5f80a89d4d31564af0f9da82b189917dcab02c09))
+
+
+
+## [0.9.7](https://github.com/debba/tabularis/compare/v0.9.6...v0.9.7) (2026-03-09)
+
+
+### Bug Fixes
+
+* build alerts ([c5cf57a](https://github.com/debba/tabularis/commit/c5cf57a16efc41e4b3644372fa779794c2b2cf6d))
+* merged code ([c430a5b](https://github.com/debba/tabularis/commit/c430a5b00a24b733dec3b35b6c312391459cebd9))
+* **tabs:** prefer loaded activeTabId or null, avoid implicit fallback ([297138b](https://github.com/debba/tabularis/commit/297138b702b51134d91f9f0b487f867a6c667546))
+* use SqliteConnectOptions for reliable WAL mode database opening ([b0d0a4f](https://github.com/debba/tabularis/commit/b0d0a4f44ed8ec929daa5745bbb0e701e8c2201e))
+
+
+### Features
+
+* add connections group ([1e91768](https://github.com/debba/tabularis/commit/1e91768d3171f1a08b8b80e81fc269e2684510bc))
+* **credential-cache:** add credential cache to reduce keychain calls, ([ca2e668](https://github.com/debba/tabularis/commit/ca2e668763491032d5b109105889b76ad49e5de5))
+* **credentials:** fetch connection credentials when editing connections ([e580ccf](https://github.com/debba/tabularis/commit/e580ccfd5f62466679fbcd288d6d8acd5db16071))
+* **modals:** add ConfirmModal and replace inline confirm dialogs ([0ceddda](https://github.com/debba/tabularis/commit/0cedddad723105ffb16e08a02f17570754e83bda))
+* **new-connection-modal:** preselect databases from initial connection ([53d10c9](https://github.com/debba/tabularis/commit/53d10c91ec2260023b564a66ac635e0f68f55875))
+* **plugins:** add per-plugin interpreter settings with error modal ([64ed30c](https://github.com/debba/tabularis/commit/64ed30cab6e980f78ad4c29c3e67841451857d74))
+* **plugins:** add plugin remove modal and integrate into Settings ([e2d38f5](https://github.com/debba/tabularis/commit/e2d38f5292c61dd7ce14dfd8fb912846692ef7f7))
+* **plugins:** add plugin settings and no_connection_required flag ([7097190](https://github.com/debba/tabularis/commit/70971909c34fc73b3c59ab743cb183654e54e63f))
+* **select:** add Select component and replace SearchableSelect ([3be733a](https://github.com/debba/tabularis/commit/3be733a176b3265a7d2bd06a7dc2f4cd271556fa))
+* **settings:** add portal-based plugin version dropdown ([9f4f82c](https://github.com/debba/tabularis/commit/9f4f82c2ce90bada6d091fe08e1042ead58f98b9))
+
+## [0.9.6](https://github.com/debba/tabularis/compare/v0.9.5...v0.9.6) (2026-03-07)
+
+
+### Bug Fixes
+
+* add autoComplete="off" to all connection dialog inputs ([573380b](https://github.com/debba/tabularis/commit/573380b6f01888e4ddadc3b5a597de454b2e413a)), closes [#64](https://github.com/debba/tabularis/issues/64)
+* disable macOS autocorrect on connection dialog inputs ([481f7fe](https://github.com/debba/tabularis/commit/481f7fe4bb081c8424fe2ab3050986d547ea26f7)), closes [#64](https://github.com/debba/tabularis/issues/64)
+* **website:** scope badge image rule to shields.io only ([af7dfb7](https://github.com/debba/tabularis/commit/af7dfb7cf1bfa6933be1617af11a2b8fea2b89fd))
+
+
+### Features
+
+* **editor:** add close tab keyboard shortcut ([167de6e](https://github.com/debba/tabularis/commit/167de6e9409f121b58622556954d8f17e9c9db10))
+* **filters:** add structured filter utils and toolbar UI ([150e08f](https://github.com/debba/tabularis/commit/150e08f323bcedc477ba605a89eec6d513ce9130))
+* **plugins:** add clickhouse plugin to registry ([1a78418](https://github.com/debba/tabularis/commit/1a78418c41b509195d3e8672582f8892f660c008))
+* **plugins:** add install error modal and improve installer logging ([db2d0de](https://github.com/debba/tabularis/commit/db2d0ded454b5f2be9110d0279dc6b3ec8cdccd0))
+* **plugins:** add Redis plugin to registry with version 0.1.0 and download links ([848b530](https://github.com/debba/tabularis/commit/848b530010306b3087fe1604dc20cf5ca24375b0))
+* **plugins:** update redis plugin assets and add download logging ([204175f](https://github.com/debba/tabularis/commit/204175f4a2370df23bc81a6a1b7fc0b7014ed7de))
+* **table-toolbar:** add ORDER BY autocomplete ([ed58068](https://github.com/debba/tabularis/commit/ed58068e127842a9784c3d3788df283049411f71))
+
 ## [0.9.5](https://github.com/debba/tabularis/compare/v0.9.4...v0.9.5) (2026-03-04)
 
 

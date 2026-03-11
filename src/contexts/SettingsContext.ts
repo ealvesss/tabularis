@@ -9,6 +9,11 @@ export type AiProvider =
   | "custom-openai";
 export type ERDiagramLayout = "LR" | "TB";
 
+export interface PluginConfig {
+  interpreter?: string;
+  settings?: Record<string, unknown>;
+}
+
 export interface Settings {
   resultPageSize: number; // Changed from queryLimit to match backend config
   language: AppLanguage;
@@ -26,7 +31,7 @@ export interface Settings {
   maxLogEntries?: number;
   erDiagramDefaultLayout?: ERDiagramLayout;
   activeExternalDrivers?: string[];
-  maxConnections?: number;
+  plugins?: Record<string, PluginConfig>;
 }
 
 export interface SettingsContextType {
@@ -54,5 +59,4 @@ export const DEFAULT_SETTINGS: Settings = {
   loggingEnabled: true,
   maxLogEntries: 1000,
   erDiagramDefaultLayout: "LR",
-  maxConnections: 1,
 };

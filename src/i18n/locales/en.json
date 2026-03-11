@@ -180,8 +180,6 @@
     "pageSize": "Result Page Size (Limit)",
     "pageSizeDesc": "Limits the number of rows fetched per query to prevent performance issues. Set to 0 to disable (not recommended).",
     "rows": "rows",
-    "maxConnections": "Connection Pool Size",
-    "maxConnectionsDesc": "Maximum number of concurrent database connections per pool. Takes effect when a new connection pool is created. Restart connections to apply changes.",
     "connections": "connections",
     "appearance": "Appearance",
     "localization": "Localization",
@@ -325,6 +323,23 @@
         "details": "Error Details",
         "copy": "Copy",
         "copied": "Copied!"
+      },
+      "startError": {
+        "title": "Plugin Failed to Start",
+        "subtitle": "The plugin process could not be launched. Check the error details below.",
+        "interpreterHint": "This plugin may require an interpreter (e.g. Python). Use Plugin Settings to configure the interpreter path.",
+        "details": "Error Details",
+        "copy": "Copy",
+        "copied": "Copied!",
+        "configure": "Configure Interpreter"
+      },
+      "pluginSettings": {
+        "title": "Plugin Settings",
+        "interpreter": "Interpreter",
+        "interpreterDesc": "Optional. Specify the executable used to run this plugin (e.g. python3 on macOS/Linux, python or a full path on Windows). Leave blank to use the default.",
+        "interpreterPlaceholder": "e.g. python3",
+        "browse": "Browse...",
+        "fieldRequired": "{{label}} is required"
       }
     },
     "shortcuts": {
@@ -431,6 +446,8 @@
     "sshKeyPassphrase": "SSH Key Passphrase (Optional)",
     "sshKeyPassphrasePlaceholder": "Enter key passphrase if encrypted",
     "saveKeychain": "Save passwords in Keychain",
+    "maxConnections": "Connection Pool Size",
+    "maxConnectionsDesc": "Maximum number of concurrent connections for this pool. Leave empty to use the default (10).",
     "testConnection": "Test Connection",
     "save": "Save",
     "failSave": "Failed to save connection",
@@ -438,7 +455,14 @@
     "useSshConnection": "Use Existing SSH Connection",
     "createInlineSsh": "Configure SSH Inline",
     "manageSshConnections": "Manage SSH Connections",
-    "noSshConnections": "No SSH connections available"
+    "noSshConnections": "No SSH connections available",
+    "sslMode": "SSL Mode",
+    "sslModes": {
+      "disable": "Disable",
+      "allow": "Allow",
+      "prefer": "Prefer",
+      "require": "Require"
+    }
   },
   "sshConnections": {
     "title": "SSH Connections",
@@ -823,5 +847,24 @@
         "unknown": "unknown"
       }
     }
+  },
+  "groups": {
+    "title": "Groups",
+    "newGroup": "New Group",
+    "createGroup": "Create Group",
+    "rename": "Rename",
+    "delete": "Delete",
+    "deleteConfirm": "Are you sure you want to delete group \"{{name}}\"? Connections in this group will be moved to ungrouped.",
+    "deleteTitle": "Delete Group",
+    "connection": "connection",
+    "connections": "connections",
+    "ungrouped": "Ungrouped",
+    "moveToGroup": "Move to Group",
+    "removeFromGroup": "Remove from Group",
+    "noGroups": "No groups yet",
+    "createFirst": "Create your first group to organize connections",
+    "groupName": "Group name",
+    "dragHint": "Drag connections here",
+    "createError": "Failed to create group"
   }
 }
