@@ -338,6 +338,26 @@ export const NewConnectionModal = ({
     }
     setDriver(newDriver);
 
+    setFormData({
+      driver: newDriver,
+      host: "",
+      port: drivers.find((d) => d.id === newDriver)?.default_port ?? undefined,
+      username: "",
+      password: "",
+      database: "",
+      ssl_mode: "",
+      ssh_enabled: false,
+      ssh_connection_id: undefined,
+      ssh_host: undefined,
+      ssh_port: 22,
+      ssh_user: undefined,
+      ssh_password: undefined,
+      ssh_key_file: undefined,
+      ssh_key_passphrase: undefined,
+      save_in_keychain: false,
+    });
+    setSelectedDatabasesState([]);
+    setDbSearchQuery("");
     setAvailableDatabases([]);
     setDatabaseLoadError(null);
     setStatus("idle");

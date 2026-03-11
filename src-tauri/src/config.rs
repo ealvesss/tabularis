@@ -138,6 +138,9 @@ pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
         if config.active_external_drivers.is_some() {
             existing_config.active_external_drivers = config.active_external_drivers;
         }
+        if config.plugins.is_some() {
+            existing_config.plugins = config.plugins;
+        }
 
         if config.plugins.is_some() {
             existing_config.plugins = config.plugins;
